@@ -12,8 +12,10 @@ GitHub Actionsで1日数回実行し、生成されたmarket_data.jsonをアプ�
 import json
 import datetime
 import sys
+import urllib.parse
 
 import yfinance as yf
+import feedparser
 
 
 # 監視する銘柄。日本株は "コード.T"。アプリのportfolioと対応させる。
@@ -127,6 +129,85 @@ def fetch_one(ticker):
 
 
 # ------------------------------------------------------------------
+# 市場指数の取得(市場全体の地合いを見るため)
+# ------------------------------------------------------------------
+MARKET_INDICES = {
+    "^N225": "日経平均",
+    "^TPX": "TOPIX",
+    "JPY=X": "ドル円",
+    "^GSPC": "S&P500",
+    "^SOX": "半導体指数(SOX)",
+}
+
+
+def fetch_market_indices():
+    """主要指数の前日比を取得。市場全体が上げか下げかを判断する材料。"""
+    out = {}
+    for symbol, name in MARKET_INDICES.items():
+        try:
+            hist = yf.Ticker(symbol).history(period="5d")
+            if len(hist) < 2:
+                continue
+            last = float(hist["Close"].iloc[-1])
+            prev = float(hist["Close"].iloc[-2])
+            chg = (last - prev) / prev * 100
+            out[name] = {
+                "value": round(last, 2),
+                "change_pct": round(chg, 2),
+            }
+            print(f"  指数 {name}: {chg:+.2f}%")
+        except Exception as e:
+            print(f"  [warn] 指数 {symbol} 取得失敗: {e}")
+    return out
+
+
+# ------------------------------------------------------------------
+# ニュースの取得(Googleニュース RSS)
+# ------------------------------------------------------------------
+def fetch_news_for(ticker, name, limit=5):
+    """銘柄に関する最新ニュースの見出しを取得する。
+    日本株は日本語、米国株は英語で検索。見出しに媒体名(Reuters/日経など)が含まれる。"""
+    is_jp = ticker.endswith(".T")
+    query = name if name else ticker
+    if is_jp:
+        query = f"{query} 株"
+        params = "hl=ja&gl=JP&ceid=JP:ja"
+    else:
+        query = f"{query} stock"
+        params = "hl=en-US&gl=US&ceid=US:en"
+    q = urllib.parse.quote(query)
+    url = f"https://news.google.com/rss/search?q={q}&{params}"
+    try:
+        feed = feedparser.parse(url)
+        items = []
+        for entry in feed.entries[:limit]:
+            # published日付があれば添える
+            date = ""
+            if hasattr(entry, "published_parsed") and entry.published_parsed:
+                import time
+                date = time.strftime("%m/%d", entry.published_parsed)
+            items.append({"title": entry.title, "date": date})
+        return items
+    except Exception as e:
+        print(f"  [warn] {ticker} ニュース取得失敗: {e}")
+        return []
+
+
+# 主要銘柄コード→名前(ニュース検索の精度を上げる)
+TICKER_NAMES = {
+    "7203.T": "トヨタ自動車", "5803.T": "フジクラ", "6758.T": "ソニーグループ",
+    "8306.T": "三菱UFJ", "9984.T": "ソフトバンクグループ", "6861.T": "キーエンス",
+    "9433.T": "KDDI", "8035.T": "東京エレクトロン", "6098.T": "リクルート",
+    "4063.T": "信越化学", "5016.T": "JX金属", "7974.T": "任天堂", "6501.T": "日立製作所",
+    "NVDA": "NVIDIA", "AAPL": "Apple", "MSFT": "Microsoft", "TSLA": "Tesla",
+}
+
+
+def name_for(ticker):
+    return TICKER_NAMES.get(ticker, ticker.replace(".T", ""))
+
+
+# ------------------------------------------------------------------
 # メイン
 # ------------------------------------------------------------------
 def main():
@@ -140,20 +221,29 @@ def main():
         "updated_at": jst.strftime("%Y-%m-%d %H:%M"),
         "updated_at_utc": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "note": "yfinance日足データ(約20分遅延)。現在値はアプリで手入力。",
+        "market": {},
         "stocks": {},
     }
 
+    # 市場指数(市場全体の地合い)
+    print("市場指数を取得中...")
+    result["market"] = fetch_market_indices()
+
+    # 各銘柄: 株価データ + ニュース
     for ticker in tickers:
         print(f"取得中: {ticker}")
         data = fetch_one(ticker)
         if data:
+            name = name_for(ticker)
+            print(f"  ニュース取得: {name}")
+            data["news"] = fetch_news_for(ticker, name)
             result["stocks"][ticker] = data
-            print(f"  OK ({len(data['dates'])}日分, 終値 {data['prev_close']})")
+            print(f"  OK ({len(data['dates'])}日分, 終値 {data['prev_close']}, ニュース{len(data['news'])}件)")
 
     with open("market_data.json", "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, separators=(",", ":"))
 
-    print(f"完了: {len(result['stocks'])}銘柄を market_data.json に保存")
+    print(f"完了: {len(result['stocks'])}銘柄 + 指数{len(result['market'])}件を market_data.json に保存")
 
 
 if __name__ == "__main__":
