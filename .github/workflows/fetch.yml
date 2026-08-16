@@ -25,7 +25,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install yfinance
+        run: pip install yfinance feedparser
 
       - name: Fetch market data
         run: python fetch_data.py
