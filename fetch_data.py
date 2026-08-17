@@ -87,6 +87,38 @@ def macd(values, fast=12, slow=26, signal=9):
     return macd_line, signal_line, hist
 
 
+def stochastic(highs, lows, closes, k_period=14, d_period=3, smooth=3):
+    """ストキャスティクス(%K, %D)を計算。
+    Fast %K = (終値 - n日間安値) / (n日間高値 - n日間安値) * 100
+    Slow %K = Fast %K の smooth日移動平均
+    %D = Slow %K の d_period日移動平均
+    一般的な「スロー・ストキャスティクス」を返す。"""
+    n = len(closes)
+    fast_k = [None] * n
+    for i in range(n):
+        if i + 1 < k_period:
+            continue
+        window_high = max(highs[i + 1 - k_period:i + 1])
+        window_low = min(lows[i + 1 - k_period:i + 1])
+        rng = window_high - window_low
+        if rng == 0:
+            fast_k[i] = 50.0  # レンジがゼロ(値動きなし)のときは中立50
+        else:
+            fast_k[i] = (closes[i] - window_low) / rng * 100
+    # Slow %K = Fast %K の smooth日平均
+    slow_k = sma([x if x is not None else 0 for x in fast_k], smooth)
+    # None を維持(平滑化の元がNoneの区間)
+    for i in range(n):
+        if fast_k[i] is None:
+            slow_k[i] = None
+    # %D = Slow %K の d_period日平均
+    pct_d = sma([x if x is not None else 0 for x in slow_k], d_period)
+    for i in range(n):
+        if slow_k[i] is None:
+            pct_d[i] = None
+    return slow_k, pct_d
+
+
 def round_or_none(x, digits=2):
     return round(x, digits) if x is not None else None
 
@@ -104,11 +136,14 @@ def fetch_one(ticker):
     dates = [d.strftime("%Y-%m-%d") for d in hist.index]
     closes = [float(c) for c in hist["Close"]]
     volumes = [int(v) for v in hist["Volume"]]
+    highs = [float(h) for h in hist["High"]]
+    lows = [float(l) for l in hist["Low"]]
 
     # 指標を計算
     sma_short = sma(closes, 25)   # 短期線(25日)
     sma_long = sma(closes, 75)    # 長期線(75日)
     macd_line, signal_line, hist_macd = macd(closes)
+    stoch_k, stoch_d = stochastic(highs, lows, closes)  # ストキャスティクス(%K, %D)
 
     # --- 前日終値と最新値を分けて取得 ---
     # prev_close: 本当の「前の営業日の終値」
@@ -162,6 +197,8 @@ def fetch_one(ticker):
         "macd": [round_or_none(x, 3) for x in macd_line],
         "macd_signal": [round_or_none(x, 3) for x in signal_line],
         "macd_hist": [round_or_none(x, 3) for x in hist_macd],
+        "stoch_k": [round_or_none(x, 1) for x in stoch_k],
+        "stoch_d": [round_or_none(x, 1) for x in stoch_d],
     }
 
 
