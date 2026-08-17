@@ -108,7 +108,40 @@ def fetch_one(ticker):
     sma_long = sma(closes, 75)    # 長期線(75日)
     macd_line, signal_line, hist_macd = macd(closes)
 
-    prev_close = closes[-1]  # 最新の終値(=前日終値として扱う。手入力の現在値と比較)
+    # --- 前日終値と最新値を分けて取得 ---
+    # prev_close: 本当の「前の営業日の終値」
+    # latest_price: 今の時価(取引時間中なら形成中の値。約20分遅延)
+    prev_close = None
+    latest_price = None
+    price_time = None
+    try:
+        fi = t.fast_info
+        # fast_infoが持つ「前営業日終値」と「最新価格」
+        prev_close = float(fi.get("previous_close")) if fi.get("previous_close") else None
+        latest_price = float(fi.get("last_price")) if fi.get("last_price") else None
+    except Exception as e:
+        print(f"  [warn] {ticker} fast_info失敗: {e}")
+
+    # フォールバック: fast_infoが取れないとき日足から推定
+    # 日足の最終バーが「今日」なら、その1つ前が前日終値・最終バーが最新値
+    if prev_close is None or latest_price is None:
+        today = datetime.date.today().strftime("%Y-%m-%d")
+        last_is_today = dates[-1] == today
+        if last_is_today and len(closes) >= 2:
+            if prev_close is None:
+                prev_close = closes[-2]   # 前営業日の終値
+            if latest_price is None:
+                latest_price = closes[-1] # 今日の(形成中)値
+        else:
+            # 最終バーが前営業日 → それが前日終値。最新値も同じ(場が閉じている)
+            if prev_close is None:
+                prev_close = closes[-1]
+            if latest_price is None:
+                latest_price = closes[-1]
+
+    # 最新値の時刻(このスクリプト実行時刻=データ取得時刻)
+    jst = datetime.timezone(datetime.timedelta(hours=9))
+    price_time = datetime.datetime.now(jst).strftime("%Y-%m-%d %H:%M")
 
     # 通貨判定
     currency = "JPY" if ticker.endswith(".T") else "USD"
@@ -117,6 +150,8 @@ def fetch_one(ticker):
         "ticker": ticker,
         "currency": currency,
         "prev_close": round_or_none(prev_close),
+        "latest_price": round_or_none(latest_price),
+        "price_time": price_time,
         "dates": dates,
         "closes": [round_or_none(c) for c in closes],
         "volumes": volumes,
