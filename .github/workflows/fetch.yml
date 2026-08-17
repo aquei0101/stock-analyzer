@@ -29,6 +29,8 @@ jobs:
         run: pip install yfinance feedparser
 
       - name: Fetch market data
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
         run: python fetch_data.py
 
       - name: Commit data
