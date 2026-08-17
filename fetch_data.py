@@ -119,6 +119,43 @@ def stochastic(highs, lows, closes, k_period=14, d_period=3, smooth=3):
     return slow_k, pct_d
 
 
+def rsi(closes, period=14):
+    """RSI(相対力指数)をWilderの平滑化で計算。0〜100。"""
+    n = len(closes)
+    out = [None] * n
+    if n < period + 1:
+        return out
+    # 最初のperiod分の平均上昇/下落
+    gains = 0.0
+    losses = 0.0
+    for i in range(1, period + 1):
+        diff = closes[i] - closes[i - 1]
+        if diff >= 0:
+            gains += diff
+        else:
+            losses -= diff
+    avg_gain = gains / period
+    avg_loss = losses / period
+    if avg_loss == 0:
+        out[period] = 100.0
+    else:
+        rs = avg_gain / avg_loss
+        out[period] = 100 - (100 / (1 + rs))
+    # 以降はWilder平滑化
+    for i in range(period + 1, n):
+        diff = closes[i] - closes[i - 1]
+        gain = diff if diff >= 0 else 0.0
+        loss = -diff if diff < 0 else 0.0
+        avg_gain = (avg_gain * (period - 1) + gain) / period
+        avg_loss = (avg_loss * (period - 1) + loss) / period
+        if avg_loss == 0:
+            out[i] = 100.0
+        else:
+            rs = avg_gain / avg_loss
+            out[i] = 100 - (100 / (1 + rs))
+    return out
+
+
 def round_or_none(x, digits=2):
     return round(x, digits) if x is not None else None
 
@@ -144,6 +181,7 @@ def fetch_one(ticker):
     sma_long = sma(closes, 75)    # 長期線(75日)
     macd_line, signal_line, hist_macd = macd(closes)
     stoch_k, stoch_d = stochastic(highs, lows, closes)  # ストキャスティクス(%K, %D)
+    rsi_vals = rsi(closes)  # RSI(過熱判定用)
 
     # --- 前日終値と最新値を分けて取得 ---
     # prev_close: 本当の「前の営業日の終値」
@@ -199,6 +237,7 @@ def fetch_one(ticker):
         "macd_hist": [round_or_none(x, 3) for x in hist_macd],
         "stoch_k": [round_or_none(x, 1) for x in stoch_k],
         "stoch_d": [round_or_none(x, 1) for x in stoch_d],
+        "rsi": [round_or_none(x, 1) for x in rsi_vals],
     }
 
 
