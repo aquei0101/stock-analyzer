@@ -12,7 +12,9 @@ GitHub Actionsで1日数回実行し、生成されたmarket_data.jsonをアプ�
 import json
 import datetime
 import sys
+import os
 import urllib.parse
+import urllib.request
 
 import yfinance as yf
 import feedparser
@@ -243,6 +245,129 @@ def name_for(ticker):
 
 
 # ------------------------------------------------------------------
+# 米国経済指標(FRED)
+# FRED = セントルイス連銀の公式経済データベース。無料・公式・正確。
+# APIキーは環境変数 FRED_API_KEY から読む(GitHub Secretsで設定)。
+# ------------------------------------------------------------------
+# 監視する指標: (FREDシリーズID, 表示名, 単位, 発表サイクルの説明)
+FRED_SERIES = [
+    ("CPIAUCSL",   "CPI(消費者物価指数)",       "index", "毎月中旬"),
+    ("CPILFESL",   "コアCPI(除く食品・エネルギー)", "index", "毎月中旬"),
+    ("PPIACO",     "PPI(生産者物価指数)",       "index", "毎月中旬"),
+    ("PCEPILFE",   "コアPCE(FRB重視の指標)",    "index", "毎月末〜翌月初"),
+    ("UNRATE",     "失業率",                     "percent", "毎月第1金曜"),
+    ("FEDFUNDS",   "FF金利(政策金利)",          "percent", "毎月"),
+    ("DGS10",      "米10年国債利回り",           "percent", "毎営業日"),
+]
+
+
+def fetch_fred_series(series_id, api_key, n=13):
+    """FREDから1つの指標の直近データを取得。前月比・前年比も計算。"""
+    url = (f"https://api.stlouisfed.org/fred/series/observations"
+           f"?series_id={series_id}&api_key={api_key}&file_type=json"
+           f"&sort_order=desc&limit={n}")
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "stock-monitor"})
+        with urllib.request.urlopen(req, timeout=15) as res:
+            data = json.loads(res.read().decode())
+        obs = data.get("observations", [])
+        # 有効な値だけ(欠損は "." で来る)
+        points = [(o["date"], float(o["value"])) for o in obs if o["value"] not in (".", "")]
+        if not points:
+            return None
+        latest_date, latest_val = points[0]
+        result = {
+            "date": latest_date,
+            "value": round(latest_val, 2),
+        }
+        # 前月比(直近2点)
+        if len(points) >= 2:
+            prev_val = points[1][1]
+            if prev_val:
+                result["mom"] = round((latest_val - prev_val) / prev_val * 100, 2)
+        # 前年比(12ヶ月前 = 13点目)
+        if len(points) >= 13:
+            yoy_val = points[12][1]
+            if yoy_val:
+                result["yoy"] = round((latest_val - yoy_val) / yoy_val * 100, 2)
+        return result
+    except Exception as e:
+        print(f"  [warn] FRED {series_id} 取得失敗: {e}")
+        return None
+
+
+def estimate_next_release(latest_date_str, cycle_desc):
+    """実績の最新日付から、次回発表時期をざっくり推定する。
+    正確な発表日ではなく『おおよその目安』。"""
+    try:
+        d = datetime.datetime.strptime(latest_date_str, "%Y-%m-%d").date()
+        # 月次指標は、データ基準月の翌月〜翌々月に発表されることが多い
+        # 最新データの月+1ヶ月を「次回データ基準月」とみなし、その翌月中旬を目安に
+        y, m = d.year, d.month
+        # 2ヶ月後の中旬あたりを次回発表の目安とする
+        m2 = m + 2
+        y2 = y + (m2 - 1) // 12
+        m2 = (m2 - 1) % 12 + 1
+        return f"{y2}年{m2}月頃({cycle_desc})"
+    except Exception:
+        return f"次回未定({cycle_desc})"
+
+
+def fetch_fred_indicators():
+    """FREDの全指標を取得。APIキーが無ければスキップ。"""
+    api_key = os.environ.get("FRED_API_KEY", "").strip()
+    if not api_key:
+        print("  [info] FRED_API_KEY 未設定 → 経済指標はスキップ")
+        return []
+    out = []
+    for series_id, name, unit, cycle in FRED_SERIES:
+        data = fetch_fred_series(series_id, api_key)
+        if data:
+            data["name"] = name
+            data["unit"] = unit
+            data["cycle"] = cycle
+            data["next_release"] = estimate_next_release(data["date"], cycle)
+            out.append(data)
+            print(f"  FRED {name}: {data['value']} ({data['date']})")
+    return out
+
+
+# ------------------------------------------------------------------
+# 重要マーケットニュース(Googleニュース RSS)
+# ------------------------------------------------------------------
+MARKET_NEWS_QUERIES = [
+    ("米国株 市場", "hl=ja&gl=JP&ceid=JP:ja"),
+    ("FRB 金融政策", "hl=ja&gl=JP&ceid=JP:ja"),
+    ("日経平均 相場", "hl=ja&gl=JP&ceid=JP:ja"),
+    ("インフレ CPI", "hl=ja&gl=JP&ceid=JP:ja"),
+]
+
+
+def fetch_market_news(limit_per_query=4):
+    """重要マーケットニュースの見出しを複数トピックから集める。"""
+    seen = set()
+    items = []
+    for query, params in MARKET_NEWS_QUERIES:
+        q = urllib.parse.quote(query)
+        url = f"https://news.google.com/rss/search?q={q}&{params}"
+        try:
+            feed = feedparser.parse(url)
+            for entry in feed.entries[:limit_per_query]:
+                title = entry.title
+                if title in seen:
+                    continue
+                seen.add(title)
+                date = ""
+                if hasattr(entry, "published_parsed") and entry.published_parsed:
+                    import time
+                    date = time.strftime("%m/%d", entry.published_parsed)
+                items.append({"title": title, "date": date, "topic": query})
+        except Exception as e:
+            print(f"  [warn] マーケットニュース '{query}' 取得失敗: {e}")
+    return items
+
+
+# ------------------------------------------------------------------
 # メイン
 # ------------------------------------------------------------------
 def main():
@@ -257,12 +382,23 @@ def main():
         "updated_at_utc": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "note": "yfinance日足データ(約20分遅延)。現在値はアプリで手入力。",
         "market": {},
+        "economic": [],
+        "market_news": [],
         "stocks": {},
     }
 
     # 市場指数(市場全体の地合い)
     print("市場指数を取得中...")
     result["market"] = fetch_market_indices()
+
+    # 米国経済指標(FRED)
+    print("経済指標(FRED)を取得中...")
+    result["economic"] = fetch_fred_indicators()
+
+    # 重要マーケットニュース
+    print("マーケットニュースを取得中...")
+    result["market_news"] = fetch_market_news()
+    print(f"  マーケットニュース {len(result['market_news'])}件")
 
     # 各銘柄: 株価データ + ニュース
     for ticker in tickers:
@@ -278,7 +414,9 @@ def main():
     with open("market_data.json", "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, separators=(",", ":"))
 
-    print(f"完了: {len(result['stocks'])}銘柄 + 指数{len(result['market'])}件を market_data.json に保存")
+    print(f"完了: {len(result['stocks'])}銘柄 / 指数{len(result['market'])}件 / "
+          f"経済指標{len(result['economic'])}件 / マーケットニュース{len(result['market_news'])}件 "
+          f"を market_data.json に保存")
 
 
 if __name__ == "__main__":
