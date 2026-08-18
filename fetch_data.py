@@ -157,7 +157,15 @@ def rsi(closes, period=14):
 
 
 def round_or_none(x, digits=2):
-    return round(x, digits) if x is not None else None
+    import math
+    if x is None:
+        return None
+    try:
+        if math.isnan(x) or math.isinf(x):
+            return None  # NaN/無限大はJSON非対応 → null にする
+    except (TypeError, ValueError):
+        return None
+    return round(x, digits)
 
 
 # ------------------------------------------------------------------
@@ -255,6 +263,7 @@ MARKET_INDICES = {
 
 def fetch_market_indices():
     """主要指数の前日比を取得。市場全体が上げか下げかを判断する材料。"""
+    import math
     out = {}
     for symbol, name in MARKET_INDICES.items():
         try:
@@ -263,7 +272,13 @@ def fetch_market_indices():
                 continue
             last = float(hist["Close"].iloc[-1])
             prev = float(hist["Close"].iloc[-2])
+            # NaN や 0除算を防ぐ(データ欠損時にNaNが混入するのを防止)
+            if math.isnan(last) or math.isnan(prev) or prev == 0:
+                print(f"  [warn] 指数 {symbol}: 値が無効(NaN/0)のためスキップ")
+                continue
             chg = (last - prev) / prev * 100
+            if math.isnan(chg):
+                continue
             out[name] = {
                 "value": round(last, 2),
                 "change_pct": round(chg, 2),
@@ -487,8 +502,23 @@ def main():
             result["stocks"][ticker] = data
             print(f"  OK ({len(data['dates'])}日分, 終値 {data['prev_close']}, ニュース{len(data['news'])}件)")
 
+    # 最終安全網: データ全体を走査してNaN/無限大をnullに置換する。
+    # (NaNはJSONとして無効で、アプリ側で読み込みエラーになるため)
+    import math
+    def sanitize(obj):
+        if isinstance(obj, dict):
+            return {k: sanitize(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [sanitize(v) for v in obj]
+        if isinstance(obj, float):
+            if math.isnan(obj) or math.isinf(obj):
+                return None
+        return obj
+    result = sanitize(result)
+
     with open("market_data.json", "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, separators=(",", ":"))
+        # allow_nan=False: 万一NaNが残っていればエラーで気づけるようにする
+        json.dump(result, f, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
     print(f"完了: {len(result['stocks'])}銘柄 / 指数{len(result['market'])}件 / "
           f"経済指標{len(result['economic'])}件 / マーケットニュース{len(result['market_news'])}件 "
