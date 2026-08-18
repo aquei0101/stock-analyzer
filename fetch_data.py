@@ -262,22 +262,28 @@ MARKET_INDICES = {
 
 
 def fetch_market_indices():
-    """主要指数の前日比を取得。市場全体が上げか下げかを判断する材料。"""
+    """主要指数の前日比を取得。市場全体が上げか下げかを判断する材料。
+    米国指数は日本時間の日中だと当日分がNaNになることがあるため、
+    NaNの行を除いて『有効な最新2つの終値』を使う。"""
     import math
     out = {}
     for symbol, name in MARKET_INDICES.items():
         try:
-            hist = yf.Ticker(symbol).history(period="5d")
-            if len(hist) < 2:
+            hist = yf.Ticker(symbol).history(period="10d")
+            if hist.empty:
+                print(f"  [warn] 指数 {symbol}: データなし")
                 continue
-            last = float(hist["Close"].iloc[-1])
-            prev = float(hist["Close"].iloc[-2])
-            # NaN や 0除算を防ぐ(データ欠損時にNaNが混入するのを防止)
-            if math.isnan(last) or math.isnan(prev) or prev == 0:
-                print(f"  [warn] 指数 {symbol}: 値が無効(NaN/0)のためスキップ")
+            # 終値のうちNaNでない有効な値だけを取り出す
+            valid = [float(c) for c in hist["Close"] if not math.isnan(float(c))]
+            if len(valid) < 2:
+                print(f"  [warn] 指数 {symbol}: 有効な終値が不足({len(valid)}件)")
+                continue
+            last = valid[-1]
+            prev = valid[-2]
+            if prev == 0:
                 continue
             chg = (last - prev) / prev * 100
-            if math.isnan(chg):
+            if math.isnan(chg) or math.isinf(chg):
                 continue
             out[name] = {
                 "value": round(last, 2),
