@@ -262,21 +262,51 @@ MARKET_INDICES = {
 
 
 def fetch_market_indices():
-    """主要指数の前日比を取得。市場全体が上げか下げかを判断する材料。"""
+    """主要指数の前日比を取得。市場全体が上げか下げかを判断する材料。
+    fast_info の previous_close(前営業日の確定終値)を優先して使う。
+    これなら米国指数が日本時間の日中でも、確定した前営業日の値を安定して取れる。
+    (履歴の最新行はNaNや未確定値になることがあるため使わない)"""
+    import math
     out = {}
     for symbol, name in MARKET_INDICES.items():
         try:
-            hist = yf.Ticker(symbol).history(period="5d")
-            if len(hist) < 2:
+            t = yf.Ticker(symbol)
+            value = None      # 表示する値(=前営業日の確定終値)
+            change_pct = None
+            # まず fast_info から前営業日終値を取る
+            try:
+                fi = t.fast_info
+                pc = fi.get("previous_close")
+                if pc is not None and not math.isnan(float(pc)):
+                    value = float(pc)
+            except Exception:
+                pass
+            # 前日比の計算に、確定終値の並び(NaN除去)を使う
+            try:
+                hist = t.history(period="10d")
+                closes = [float(c) for c in hist["Close"] if not math.isnan(float(c))]
+            except Exception:
+                closes = []
+            if value is None and len(closes) >= 1:
+                value = closes[-1]
+            # 前日比: value と その1つ前の確定終値
+            if value is not None and len(closes) >= 2:
+                prev_prev = None
+                if abs(closes[-1] - value) < max(0.01, abs(value)*0.0005):
+                    prev_prev = closes[-2]
+                else:
+                    prev_prev = closes[-1]
+                if prev_prev and prev_prev != 0:
+                    change_pct = (value - prev_prev) / prev_prev * 100
+            if value is None or math.isnan(value) or math.isinf(value):
+                print(f"  [warn] 指数 {symbol}: 有効な値が取れずスキップ")
                 continue
-            last = float(hist["Close"].iloc[-1])
-            prev = float(hist["Close"].iloc[-2])
-            chg = (last - prev) / prev * 100
-            out[name] = {
-                "value": round(last, 2),
-                "change_pct": round(chg, 2),
-            }
-            print(f"  指数 {name}: {chg:+.2f}%")
+            entry = {"value": round(value, 2)}
+            if change_pct is not None and not math.isnan(change_pct) and not math.isinf(change_pct):
+                entry["change_pct"] = round(change_pct, 2)
+            out[name] = entry
+            cp = entry.get("change_pct")
+            print(f"  指数 {name}: {value:.2f}" + (f" ({cp:+.2f}%)" if cp is not None else ""))
         except Exception as e:
             print(f"  [warn] 指数 {symbol} 取得失敗: {e}")
     return out
